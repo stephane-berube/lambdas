@@ -1,0 +1,10 @@
+version: 0.2
+
+phases:
+  build:
+    commands:
+      # Zip all folders without including the folder itself
+      - find * -maxdepth 1 -type d -exec bash -c "cd {}; zip -r ../{}.zip *" \;
+artifacts:
+  files:
+    - "*.zip"
