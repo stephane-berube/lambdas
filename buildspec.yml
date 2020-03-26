@@ -3,8 +3,32 @@ version: 0.2
 phases:
   build:
     commands:
-      # Zip all folders without including the folder itself
-      - find * -maxdepth 1 -type d -exec bash -c "cd {}; zip -r ../{}.zip *" \;
+      - |
+        shopt -s dotglob
+
+        # Iterate through all top-level directories
+        find * -prune -maxdepth 1 -type d | while IFS= read -r d; do
+          cd "${d}"
+
+          # If the lambda depends on libs listed in requirements.txt
+          if [ -f requirements.txt ]; then
+            # Create a vendor folder and install the libs in there
+            mkdir -p vendor
+            pip install --target vendor -r requirements.txt
+
+            # Zip the dependencies
+            cd vendor
+            zip -r9 ../../"${d}".zip .
+            cd ..
+
+            # Remove the vendor directory since we don't want it in the .zip twice
+            rm -r vendor
+          fi
+
+          # Zip everything else as-is
+          zip -gr ../"${d}".zip *
+          cd ..
+        done
 artifacts:
   files:
     - "*.zip"
