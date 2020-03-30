@@ -49,14 +49,12 @@ def lambda_handler(event, context):
         if stackset["name"] == "ised-roles":
             Capabilities = ["CAPABILITY_NAMED_IAM"]
 
-        # Ignore guard-duty for now
-        if stackset["name"] != "ised-guard-duty":
-            cfn_client.update_stack_set(
-                StackSetName=stackset["name"],
-                TemplateURL=TemplateURL,
-                Parameters=parameters_from_s3,
-                Capabilities=Capabilities
-            )
+        cfn_client.update_stack_set(
+            StackSetName=stackset["name"],
+            TemplateURL=TemplateURL,
+            Parameters=parameters_from_s3,
+            Capabilities=Capabilities
+        )
 
         print(
             "StackSetName: " + stackset["name"] +
