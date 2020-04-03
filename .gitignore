@@ -1,1 +1,6 @@
+# Ignore 'vendor' folders in any directory
 vendor
+
+# Ignore the root 'out' folder that contains .zips
+/out/
+
