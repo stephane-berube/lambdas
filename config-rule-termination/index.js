@@ -1,7 +1,10 @@
+// This code is based on the "config-rule-change-triggered" Lambda Blueprint
+// Most of the modifications are in the "evaluateChangeNotificationCompliance"
+// function and the handler export
+
 const aws = require('aws-sdk');
-
 const config = new aws.ConfigService();
-
+const ec2 = new aws.EC2();
 
 // Helper function used to validate input
 function checkDefined(reference, referenceName) {
@@ -75,56 +78,69 @@ function isApplicable(configurationItem, event) {
 // In this example, we simply decide that the resource is compliant if it is an instance and its type matches the type specified as the desired type.
 // If the resource is not an instance, then we deem this resource to be not applicable. (If the scope of the rule is specified to include only
 // instances, this rule would never have been invoked.)
-function evaluateChangeNotificationCompliance(configurationItem, ruleParameters) {
+function evaluateChangeNotificationCompliance(configurationItem) {
     checkDefined(configurationItem, 'configurationItem');
     checkDefined(configurationItem.configuration, 'configurationItem.configuration');
-    checkDefined(ruleParameters, 'ruleParameters');
 
     if (configurationItem.resourceType !== 'AWS::EC2::Instance') {
-        return 'NOT_APPLICABLE';
-    } else if (ruleParameters.desiredInstanceType === configurationItem.configuration.instanceType) {
-        return 'COMPLIANT';
+        return Promise.resolve('NOT_APPLICABLE');
     }
-    return 'NON_COMPLIANT';
+
+    const params = {
+        Attribute: "disableApiTermination",
+        InstanceId: configurationItem.configuration.instanceId
+    };
+
+    return ec2.describeInstanceAttribute(params).promise();
 }
 
-// This is the handler that's invoked by Lambda
-// Most of this code is boilerplate; use as is
 exports.handler = (event, context, callback) => {
     checkDefined(event, 'event');
     const invokingEvent = JSON.parse(event.invokingEvent);
-    const ruleParameters = JSON.parse(event.ruleParameters);
     getConfigurationItem(invokingEvent, (err, configurationItem) => {
         if (err) {
             callback(err);
         }
+
         let compliance = 'NOT_APPLICABLE';
+        let compliancePromise;
+
         const putEvaluationsRequest = {};
+
         if (isApplicable(configurationItem, event)) {
             // Invoke the compliance checking function.
-            compliance = evaluateChangeNotificationCompliance(configurationItem, ruleParameters);
-        }
-        // Put together the request that reports the evaluation status
-        putEvaluationsRequest.Evaluations = [
-            {
-                ComplianceResourceType: configurationItem.resourceType,
-                ComplianceResourceId: configurationItem.resourceId,
-                ComplianceType: compliance,
-                OrderingTimestamp: configurationItem.configurationItemCaptureTime,
-            },
-        ];
-        putEvaluationsRequest.ResultToken = event.resultToken;
+            compliancePromise = evaluateChangeNotificationCompliance(configurationItem);
 
-        // Invoke the Config API to report the result of the evaluation
-        config.putEvaluations(putEvaluationsRequest, (error, data) => {
-            if (error) {
-                callback(error, null);
-            } else if (data.FailedEvaluations.length > 0) {
-                // Ends the function execution if any evaluation results are not successfully reported.
-                callback(JSON.stringify(data), null);
-            } else {
-                callback(null, data);
-            }
-        });
+            compliancePromise.then(function(data) {
+                if (data.DisableApiTermination.Value === true) {
+                    compliance = "COMPLIANT";
+                } else {
+                    compliance = "NON_COMPLIANT";
+                }
+
+                // Put together the request that reports the evaluation status
+                putEvaluationsRequest.Evaluations = [
+                    {
+                        ComplianceResourceType: configurationItem.resourceType,
+                        ComplianceResourceId: configurationItem.resourceId,
+                        ComplianceType: compliance,
+                        OrderingTimestamp: configurationItem.configurationItemCaptureTime,
+                    },
+                ];
+                putEvaluationsRequest.ResultToken = event.resultToken;
+
+                // Invoke the Config API to report the result of the evaluation
+                config.putEvaluations(putEvaluationsRequest, (error, data) => {
+                    if (error) {
+                        callback(error, null);
+                    } else if (data.FailedEvaluations.length > 0) {
+                        // Ends the function execution if any evaluation results are not successfully reported.
+                        callback(JSON.stringify(data), null);
+                    } else {
+                        callback(null, data);
+                    }
+                });
+            });
+        }
     });
 };
