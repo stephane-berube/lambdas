@@ -5,6 +5,7 @@
 const aws = require('aws-sdk');
 const config = new aws.ConfigService();
 const ec2 = new aws.EC2();
+const rds = new aws.RDS();
 
 // Helper function used to validate input
 function checkDefined(reference, referenceName) {
@@ -82,16 +83,43 @@ function evaluateChangeNotificationCompliance(configurationItem) {
     checkDefined(configurationItem, 'configurationItem');
     checkDefined(configurationItem.configuration, 'configurationItem.configuration');
 
-    if (configurationItem.resourceType !== 'AWS::EC2::Instance') {
-        return Promise.resolve('NOT_APPLICABLE');
+    const resourceType = configurationItem.resourceType;
+    let params = {};
+
+    if (resourceType === 'AWS::EC2::Instance') {
+        params = {
+            Attribute: "disableApiTermination",
+            InstanceId: configurationItem.configuration.instanceId
+        };
+
+        return ec2.describeInstanceAttribute(params)
+                .promise()
+                .then(function(data) {
+                    if (data.DisableApiTermination.Value === true) {
+                        return Promise.resolve("COMPLIANT");
+                    } else {
+                        return Promise.resolve("NON_COMPLIANT");
+                    }
+                });
+    } else {
+        if (resourceType === 'AWS::RDS::DBInstance') {
+            params = {
+                DBInstanceIdentifier: configurationItem.configuration.dBInstanceIdentifier
+            };
+
+            return rds.describeDBInstances(params)
+                    .promise()
+                    .then(function(data) {
+                        if (data.DBInstances[0].DeletionProtection === true) {
+                            return Promise.resolve("COMPLIANT");
+                        } else {
+                            return Promise.resolve("NON_COMPLIANT");
+                        }
+                    });
+        } else {
+            return Promise.resolve('NOT_APPLICABLE');
+        }
     }
-
-    const params = {
-        Attribute: "disableApiTermination",
-        InstanceId: configurationItem.configuration.instanceId
-    };
-
-    return ec2.describeInstanceAttribute(params).promise();
 }
 
 exports.handler = (event, context, callback) => {
@@ -102,22 +130,14 @@ exports.handler = (event, context, callback) => {
             callback(err);
         }
 
-        let compliance = 'NOT_APPLICABLE';
         let compliancePromise;
-
         const putEvaluationsRequest = {};
 
         if (isApplicable(configurationItem, event)) {
             // Invoke the compliance checking function.
             compliancePromise = evaluateChangeNotificationCompliance(configurationItem);
 
-            compliancePromise.then(function(data) {
-                if (data.DisableApiTermination.Value === true) {
-                    compliance = "COMPLIANT";
-                } else {
-                    compliance = "NON_COMPLIANT";
-                }
-
+            compliancePromise.then(function(compliance) {
                 // Put together the request that reports the evaluation status
                 putEvaluationsRequest.Evaluations = [
                     {
