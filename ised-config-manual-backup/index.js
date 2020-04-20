@@ -1,6 +1,7 @@
 const aws = require( "aws-sdk" );
 
 const rds = new aws.RDS();
+const ec2 = new aws.EC2();
 const config = new aws.ConfigService();
 
 // Checks whether the invoking event is ScheduledNotification
@@ -13,7 +14,70 @@ function getDBs() {
     return rds.describeDBInstances().promise();
 }
 
-function getManualSnapshots() {
+function getVolumes() {
+    // TODO: Pagination
+    return ec2.describeVolumes().promise();
+}
+
+/**
+ * Check if there are manual snapshots for every
+ * volume in the batch
+ */
+function checkForEBSManualSnapshot( volumeBatch ) {
+    return getBatchEBSSnapshots( volumeBatch )
+        .then( ( data ) => {
+            const snapshots = data.Snapshots,
+                nbSnapshots = snapshots.length;
+
+            let volumesWithManualSnaphots = [],
+                i, j, volumeId, snapshot, tags, nbTags, tag, automated;
+
+            for ( i = 0; i < nbSnapshots; i += 1 ) {
+                automated = false;
+                snapshot = snapshots[ i ];
+                tags = snapshot.tags;
+                nbTags = tags.length;
+
+                for ( j = 0; j < nbTags; j += 1 ) {
+                    tag = tags[ j ];
+
+                    // This is an automated snapshot
+                    if ( tag.Name === "ised-backup-type" && tag.Value === "automated" ) {
+                        automated = true;
+                        break;
+                    }
+                }
+
+                if ( automated =p= false ) {
+                    volumesWithManualSnaphots.push( snapshot.VolumeId );
+                }
+            }
+
+            // Find items in the volumeBatch array that aren't in volumesWithManualSnaphots
+            volumesWithNoManualSnapshots = volumeBatch.filter( volume => !volumesWithManualSnaphots.includes( volume ) );
+
+            return Promise.resolve( volumesWithNoManualSnapshots );
+        } );
+}
+
+/**
+ * Get snapshots for the list of provided volumes
+ */
+function getBatchEBSSnapshots( volumes ) {
+    const params = {
+        Filters: [
+            {
+                Name: "volume-id",
+                Values: volumes
+            }
+        ]
+    }
+
+    // TODO: Pagination
+    return ec2.describeSnapshots( params ).promise();
+}
+
+function getManualRDSSnapshots() {
     // TODO: Pagination
     return rds.describeDBSnapshots( {
         SnapshotType: "manual"
@@ -48,7 +112,65 @@ exports.handler = async ( event ) => {
         return Promise.resolve( "Invoked for a notification other than Scheduled Notification... Ignoring." );
     }
 
-    return Promise.all( [ getDBs(), getManualSnapshots() ] )
+    // Get all the volumes in the account
+    return getVolumes()
+        // Check if they have a manual snapshot
+        .then( ( data ) => {
+            let volumes = data.Volumes,
+                batch,
+                promises = [];
+
+            while( volumes.length > 0 ) {
+                batch = volumes.splice( 0, 30 );
+
+                promises.push(
+                    checkForEBSManualSnapshot( batch )
+                );
+            }
+
+            return Promise.all( promises );
+        } )
+        // Build the "evalution" response AWS Config expects so it can
+        // flag non-compliant resources
+        .then( ( batchesOfNonCompliantVolumes ) => {
+            let i, j, nbNonCompliantVolumes, nonCompliantVolume,
+                evaluations = [],
+                nbBatches = batchesOfNonCompliantVolumes.length;
+
+            for ( i = 0; i < nbBatches; i += 1 ) {
+                nonCompliantVolumes = batchesOfNonCompliantVolumes[ i ];
+                nbNonCompliantVolumes = nonCompliantVolumes.length;
+
+                for ( j = 0; j < nbNonCompliantVolumes; j += 1) {
+                    nonCompliantVolume = nonCompliantVolumes[ j ];
+
+                    evaluations.push( {
+                        ComplianceResourceType: 'AWS::EC2::Volume',
+                        ComplianceResourceId: nonCompliantVolume,
+                        ComplianceType: "NON_COMPLIANT",
+                        OrderingTimestamp: new Date(),
+                    } );
+                }
+            }
+
+            // Initializes the request that contains the evaluation results.
+            const putEvaluationsRequest = {
+                Evaluations: evaluations,
+                ResultToken: event.resultToken,
+            };
+
+            return config.putEvaluations( putEvaluationsRequest ).promise();
+        } )
+        .catch( ( err ) => {
+            console.log( "Promise.all failed: " );
+            console.log( err );
+
+            // Notify lambda that this failed
+            return Promise.reject( err );
+        } );
+
+/*
+    return Promise.all( [ getDBs(), getManualRDSSnapshots() ] )
         .then( ( data ) => {
             const DBInstanceIdentifiers = extractDBInstanceIdentifiers( data[ 0 ].DBInstances ),
                 manualSnapshotsDBInstanceIdentifier = extractDBInstanceIdentifiers( data[ 1 ].DBSnapshots ),
@@ -78,4 +200,5 @@ exports.handler = async ( event ) => {
             // Notify lambda that this failed
             return Promise.reject( err );
         } );
+*/
 };
