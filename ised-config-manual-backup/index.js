@@ -30,7 +30,8 @@ function checkForEBSManualSnapshot( volumeBatch ) {
                 nbSnapshots = snapshots.length;
 
             let volumesWithManualSnaphots = [],
-                i, j, volumeId, snapshot, tags, nbTags, tag, automated;
+                i, j, snapshot, tags, nbTags, tag, automated,
+                volumesWithNoManualSnapshots;
 
             for ( i = 0; i < nbSnapshots; i += 1 ) {
                 automated = false;
@@ -48,13 +49,13 @@ function checkForEBSManualSnapshot( volumeBatch ) {
                     }
                 }
 
-                if ( automated =p= false ) {
+                if ( automated === false ) {
                     volumesWithManualSnaphots.push( snapshot.VolumeId );
                 }
             }
 
             // Find items in the volumeBatch array that aren't in volumesWithManualSnaphots
-            volumesWithNoManualSnapshots = volumeBatch.filter( volume => !volumesWithManualSnaphots.includes( volume ) );
+            volumesWithNoManualSnapshots = volumeBatch.filter( volume => !volumesWithManualSnaphots.includes( volume.VolumeId ) );
 
             return Promise.resolve( volumesWithNoManualSnapshots );
         } );
@@ -64,14 +65,22 @@ function checkForEBSManualSnapshot( volumeBatch ) {
  * Get snapshots for the list of provided volumes
  */
 function getBatchEBSSnapshots( volumes ) {
+    let i, volume, volumeIds = [];
+
+    for ( i = 0; i < volumes.length; i += 1 ) {
+        volume = volumes[ i ];
+
+        volumeIds.push( volume.VolumeId );
+    }
+
     const params = {
         Filters: [
             {
                 Name: "volume-id",
-                Values: volumes
+                Values: volumeIds
             }
         ]
-    }
+    };
 
     // TODO: Pagination
     return ec2.describeSnapshots( params ).promise();
@@ -104,15 +113,7 @@ function extractDBInstanceIdentifiers( objArr ) {
         } );
 }
 
-exports.handler = async ( event ) => {
-    // Parses the invokingEvent and ruleParameters values, which contain JSON objects passed as strings.
-    const invokingEvent = JSON.parse( event.invokingEvent );
-
-    if ( !( isScheduledNotification( invokingEvent ) ) ) {
-        return Promise.resolve( "Invoked for a notification other than Scheduled Notification... Ignoring." );
-    }
-
-    // Get all the volumes in the account
+function checkVolumes( event ) {
     return getVolumes()
         // Check if they have a manual snapshot
         .then( ( data ) => {
@@ -134,6 +135,7 @@ exports.handler = async ( event ) => {
         // flag non-compliant resources
         .then( ( batchesOfNonCompliantVolumes ) => {
             let i, j, nbNonCompliantVolumes, nonCompliantVolume,
+                nonCompliantVolumes,
                 evaluations = [],
                 nbBatches = batchesOfNonCompliantVolumes.length;
 
@@ -142,7 +144,7 @@ exports.handler = async ( event ) => {
                 nbNonCompliantVolumes = nonCompliantVolumes.length;
 
                 for ( j = 0; j < nbNonCompliantVolumes; j += 1) {
-                    nonCompliantVolume = nonCompliantVolumes[ j ];
+                    nonCompliantVolume = nonCompliantVolumes[ j ].VolumeId;
 
                     evaluations.push( {
                         ComplianceResourceType: 'AWS::EC2::Volume',
@@ -160,16 +162,10 @@ exports.handler = async ( event ) => {
             };
 
             return config.putEvaluations( putEvaluationsRequest ).promise();
-        } )
-        .catch( ( err ) => {
-            console.log( "Promise.all failed: " );
-            console.log( err );
-
-            // Notify lambda that this failed
-            return Promise.reject( err );
         } );
+}
 
-/*
+function checkRDS( event ) {
     return Promise.all( [ getDBs(), getManualRDSSnapshots() ] )
         .then( ( data ) => {
             const DBInstanceIdentifiers = extractDBInstanceIdentifiers( data[ 0 ].DBInstances ),
@@ -192,13 +188,16 @@ exports.handler = async ( event ) => {
             };
 
             return config.putEvaluations( putEvaluationsRequest ).promise();
-        } )
-        .catch( ( err ) => {
-            console.log( "Promise.all failed: " );
-            console.log( err );
-
-            // Notify lambda that this failed
-            return Promise.reject( err );
         } );
-*/
+}
+
+exports.handler = async ( event ) => {
+    // Parses the invokingEvent and ruleParameters values, which contain JSON objects passed as strings.
+    const invokingEvent = JSON.parse( event.invokingEvent );
+
+    if ( !( isScheduledNotification( invokingEvent ) ) ) {
+        return Promise.resolve( "Invoked for a notification other than Scheduled Notification... Ignoring." );
+    }
+
+    return Promise.all( [ checkVolumes( event ), checkRDS( event ) ] );
 };
