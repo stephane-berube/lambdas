@@ -26,38 +26,48 @@ function getVolumes() {
 function checkForEBSManualSnapshot( volumeBatch ) {
     return getBatchEBSSnapshots( volumeBatch )
         .then( ( data ) => {
-            const snapshots = data.Snapshots,
-                nbSnapshots = snapshots.length;
+            const snapshots = data.Snapshots;
 
             let volumesWithManualSnaphots = [],
-                i, j, snapshot, tags, nbTags, tag, automated,
-                volumesWithNoManualSnapshots;
+                complianceResults = [],
+                compliantVolumeIds = [];
 
-            for ( i = 0; i < nbSnapshots; i += 1 ) {
-                automated = false;
-                snapshot = snapshots[ i ];
-                tags = snapshot.tags;
-                nbTags = tags.length;
+            snapshots.forEach( ( snapshot ) => {
+                let automated = false,
+                    tags = snapshot.Tags;
 
-                for ( j = 0; j < nbTags; j += 1 ) {
-                    tag = tags[ j ];
-
+                tags.forEach( ( tag ) => {
                     // This is an automated snapshot
                     if ( tag.Name === "ised-backup-type" && tag.Value === "automated" ) {
                         automated = true;
-                        break;
                     }
-                }
+                } );
 
                 if ( automated === false ) {
-                    volumesWithManualSnaphots.push( snapshot.VolumeId );
+                    // Associative array just so we don't end up with duplicates...
+                    volumesWithManualSnaphots[ snapshot.VolumeId ] = {
+                        volumeId: snapshot.VolumeId,
+                        compliance: "COMPLIANT"
+                    };
                 }
+            } );
+
+            // Get the list of volumes with manual snapshots in a "non-associative" array
+            for ( const volumeId in volumesWithManualSnaphots ) {
+                complianceResults.push( volumesWithManualSnaphots[ volumeId ] );
+                compliantVolumeIds.push( volumeId );
             }
 
-            // Find items in the volumeBatch array that aren't in volumesWithManualSnaphots
-            volumesWithNoManualSnapshots = volumeBatch.filter( volume => !volumesWithManualSnaphots.includes( volume.VolumeId ) );
+            volumeBatch.forEach( ( volume ) => {
+                if ( !compliantVolumeIds.includes( volume.VolumeId ) ) {
+                    complianceResults.push( {
+                        volumeId: volume.VolumeId,
+                        compliance: "NON_COMPLIANT"
+                    } );
+                }
+            } );
 
-            return Promise.resolve( volumesWithNoManualSnapshots );
+            return Promise.resolve( complianceResults );
         } );
 }
 
@@ -105,11 +115,11 @@ function findDBInstanceIdentifiersWithNoManualSnapshots( DBInstanceIdentifiers, 
 
 /**
  * For a given array of objects (DBInstance, Snapshots), return an array
- * of the DBInstanceIdentifier for each object.
+ * of the DbiResourceId for each object.
  */
 function extractDBInstanceIdentifiers( objArr ) {
     return objArr.map( function( obj ) {
-            return obj.DBInstanceIdentifier;
+            return obj.DbiResourceId;
         } );
 }
 
@@ -133,27 +143,19 @@ function checkVolumes( event ) {
         } )
         // Build the "evalution" response AWS Config expects so it can
         // flag non-compliant resources
-        .then( ( batchesOfNonCompliantVolumes ) => {
-            let i, j, nbNonCompliantVolumes, nonCompliantVolume,
-                nonCompliantVolumes,
-                evaluations = [],
-                nbBatches = batchesOfNonCompliantVolumes.length;
+        .then( ( batchesComplianceResults ) => {
+            let evaluations = [];
 
-            for ( i = 0; i < nbBatches; i += 1 ) {
-                nonCompliantVolumes = batchesOfNonCompliantVolumes[ i ];
-                nbNonCompliantVolumes = nonCompliantVolumes.length;
-
-                for ( j = 0; j < nbNonCompliantVolumes; j += 1) {
-                    nonCompliantVolume = nonCompliantVolumes[ j ].VolumeId;
-
+            batchesComplianceResults.forEach( ( complianceResults ) => {
+                complianceResults.forEach( ( complianceResult ) => {
                     evaluations.push( {
                         ComplianceResourceType: 'AWS::EC2::Volume',
-                        ComplianceResourceId: nonCompliantVolume,
-                        ComplianceType: "NON_COMPLIANT",
+                        ComplianceResourceId: complianceResult.volumeId,
+                        ComplianceType: complianceResult.compliance,
                         OrderingTimestamp: new Date(),
                     } );
-                }
-            }
+                } );
+            } );
 
             // Initializes the request that contains the evaluation results.
             const putEvaluationsRequest = {
@@ -172,7 +174,14 @@ function checkRDS( event ) {
                 manualSnapshotsDBInstanceIdentifier = extractDBInstanceIdentifiers( data[ 1 ].DBSnapshots ),
                 DBInstanceIdentifiersWithNoManualSnapshots = findDBInstanceIdentifiersWithNoManualSnapshots( DBInstanceIdentifiers, manualSnapshotsDBInstanceIdentifier );
 
-            const Evaluations = DBInstanceIdentifiersWithNoManualSnapshots.map( function( dbId ) {
+            let compliantDBInstanceIdentifiers, nonCompliantEvaluations,
+                compliantEvaluations, evaluations;
+
+            compliantDBInstanceIdentifiers = DBInstanceIdentifiers.filter( ( dbId ) => {
+                return !DBInstanceIdentifiersWithNoManualSnapshots.includes( dbId );
+            } );
+
+            nonCompliantEvaluations = DBInstanceIdentifiersWithNoManualSnapshots.map( function( dbId ) {
                 return {
                     ComplianceResourceType: 'AWS::RDS::DBInstance',
                     ComplianceResourceId: dbId,
@@ -181,9 +190,20 @@ function checkRDS( event ) {
                 };
             } );
 
+            compliantEvaluations = compliantDBInstanceIdentifiers.map( ( dbId ) => {
+                return {
+                    ComplianceResourceType: 'AWS::RDS::DBInstance',
+                    ComplianceResourceId: dbId,
+                    ComplianceType: "COMPLIANT",
+                    OrderingTimestamp: new Date(),
+                };
+            } );
+
+            evaluations = nonCompliantEvaluations.concat( compliantEvaluations );
+
             // Initializes the request that contains the evaluation results.
             const putEvaluationsRequest = {
-                Evaluations: Evaluations,
+                Evaluations: evaluations,
                 ResultToken: event.resultToken,
             };
 
