@@ -1,5 +1,6 @@
-import json
 import boto3
+import json
+import os
 
 s3 = boto3.resource("s3")
 ssm_client = boto3.client('ssm')
@@ -28,6 +29,8 @@ def lambda_handler(event, context):
     else:
         stacksets_to_deploy = event["ised_test"]
 
+    bucket_name = os.environ['BucketName']
+
     TemplateBaseURL = ssm_client.get_parameter(Name="S3Templates")["Parameter"]["Value"]
 
     stacksets_to_deploy = json.loads(stacksets_to_deploy)
@@ -37,7 +40,7 @@ def lambda_handler(event, context):
         print("Processing " +  stackset["name"])
 
         # Get parameters for this stackset
-        obj = s3.Object("sb-stackset-test", "cf-parameters/" + stackset["parameters"])
+        obj = s3.Object(bucket_name, "cf-parameters/" + stackset["parameters"])
         parameters_from_s3 = json.loads(obj.get()['Body'].read().decode('utf-8') )
 
         TemplateURL = TemplateBaseURL + "cf-stacks/" + stackset["filename"]

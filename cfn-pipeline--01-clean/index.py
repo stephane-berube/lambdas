@@ -1,11 +1,12 @@
 import boto3
+import os
 
 s3 = boto3.resource("s3")
 s3_client = boto3.client("s3")
 code_pipeline = boto3.client("codepipeline")
 
 def lambda_handler(event, context):
-    bucket_name = "sb-stackset-test"
+    bucket_name = os.environ['BucketName']
     bucket = s3.Bucket(bucket_name)
 
     objects_to_delete = []

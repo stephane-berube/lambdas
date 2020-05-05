@@ -1,5 +1,6 @@
-import json
 import boto3
+import json
+import os
 
 s3 = boto3.resource("s3")
 s3_client = boto3.client("s3")
@@ -10,9 +11,10 @@ def lambda_handler(event, context):
     different_stacksets = []
     different_message = []
     stacksets = []
+    bucket_name = os.environ['BucketName']
 
     # Iterate through the files in the "cf-stacks" folder and grab the filenames
-    for p in s3_client.get_paginator("list_objects_v2").paginate(Bucket="sb-stackset-test", Prefix="cf-stacks"):
+    for p in s3_client.get_paginator("list_objects_v2").paginate(Bucket=bucket_name, Prefix="cf-stacks"):
         for e in p["Contents"]:
             key = e["Key"]
 
@@ -49,7 +51,7 @@ def lambda_handler(event, context):
 
         # Get template contents from described CFN and S3
         contents_from_cfn = response["StackSet"]["TemplateBody"]
-        obj = s3.Object("sb-stackset-test", "cf-stacks/" + stackset["filename"])
+        obj = s3.Object(bucket_name, "cf-stacks/" + stackset["filename"])
         contents_from_s3 = obj.get()['Body'].read().decode('utf-8')
 
         # Compare template contents
@@ -62,7 +64,7 @@ def lambda_handler(event, context):
 
         # Get template parameters from described CFN and S3
         parameters_from_cfn = response["StackSet"]["Parameters"]
-        obj = s3.Object("sb-stackset-test", "cf-parameters/" + stackset["parameters"])
+        obj = s3.Object(bucket_name, "cf-parameters/" + stackset["parameters"])
         parameters_from_s3 = json.loads(obj.get()['Body'].read().decode('utf-8') )
 
         # If the number of params are different, no need to compare, re-run the stackset
